@@ -1,3 +1,9 @@
+Name: "Report total S3 bucket size"
+description: "Identifies S3 buckets in AWS that are publicly accessible by inspecting their bucket policies using AWS CLI."
+category: "Cloud Security"
+platform: "AWS"
+type: "Shell Script"
+script_data: |
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError, PartialCredentialsError
 

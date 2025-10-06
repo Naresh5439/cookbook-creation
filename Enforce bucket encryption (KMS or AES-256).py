@@ -1,17 +1,18 @@
 import boto3
-from botocore.exceptions import ClientError, NoCredentialsError
+from botocore.exceptions import ClientError, NoCredentialsError, PartialCredentialsError
 
 # ----- AWS Configuration -----
-AWS_ACCESS_KEY_ID = ""
-AWS_SECRET_ACCESS_KEY = ""
+AWS_ACCESS_KEY_ID = ""  # Fill your access key
+AWS_SECRET_ACCESS_KEY = ""  # Fill your secret key
 AWS_REGION = "us-west-2"
 BUCKET_NAME = "test-timescaledb-1"
 
-# Encryption type: choose "AES256" or "aws:kms"
 ENCRYPTION_TYPE = "AES256"  # or "aws:kms"
-
-# Optional: provide a KMS key ID if using aws:kms
 KMS_KEY_ID = "arn:aws:kms:us-west-2:123456789012:key/your-kms-key-id"
+
+# ----- Force explicit credentials -----
+if not AWS_ACCESS_KEY_ID or not AWS_SECRET_ACCESS_KEY:
+    raise NoCredentialsError("No AWS credentials provided explicitly!")
 
 # Create isolated session
 session = boto3.Session(
@@ -63,5 +64,7 @@ try:
 
 except NoCredentialsError:
     print("AWS credentials not found or invalid.")
+except PartialCredentialsError:
+    print("Incomplete AWS credentials provided.")
 except ClientError as e:
     print(f"AWS Client Error: {e}")

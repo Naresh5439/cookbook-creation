@@ -1,0 +1,80 @@
+import os
+import boto3
+from dotenv import load_dotenv
+from botocore.exceptions import ClientError, NoCredentialsError, PartialCredentialsError
+
+# ----- Load environment variables -----
+load_dotenv()
+
+# ----- AWS Configuration -----
+AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
+AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+AWS_REGION = os.getenv("AWS_REGION", "us-west-2")
+BUCKET_NAME = os.getenv("BUCKET_NAME")
+ENCRYPTION_TYPE = os.getenv("ENCRYPTION_TYPE", "AES256")
+KMS_KEY_ID = os.getenv("KMS_KEY_ID")
+
+# ----- Force explicit credentials -----
+if not AWS_ACCESS_KEY_ID or not AWS_SECRET_ACCESS_KEY:
+    raise NoCredentialsError("No AWS credentials provided explicitly!")
+
+# Create isolated session
+session = boto3.Session(
+    aws_access_key_id=AWS_ACCESS_KEY_ID,
+    aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+    region_name=AWS_REGION
+)
+
+s3_client = session.client("s3")
+
+try:
+    # ----- Check existing encryption configuration -----
+    try:
+        current = s3_client.get_bucket_encryption(Bucket=BUCKET_NAME)
+        rules = current["ServerSideEncryptionConfiguration"]["Rules"]
+        print(f"Bucket '{BUCKET_NAME}' already has encryption configured: {rules}")
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ServerSideEncryptionConfigurationNotFoundError":
+            print(f"Bucket '{BUCKET_NAME}' has no encryption. Applying now...")
+        else:
+            raise e
+
+    # ----- Apply encryption -----
+    if ENCRYPTION_TYPE.upper() == "AES256":
+        s3_client.put_bucket_encryption(
+            Bucket=BUCKET_NAME,
+            ServerSideEncryptionConfiguration={
+                'Rules': [
+                    {'ApplyServerSideEncryptionByDefault': {'SSEAlgorithm': 'AES256'}}
+                ]
+            }
+        )
+        print(f"AES-256 encryption enabled for bucket '{BUCKET_NAME}'.")
+
+    elif ENCRYPTION_TYPE.lower() == "aws:kms":
+        if not KMS_KEY_ID:
+            raise ValueError("KMS_KEY_ID is required when using aws:kms encryption.")
+        s3_client.put_bucket_encryption(
+            Bucket=BUCKET_NAME,
+            ServerSideEncryptionConfiguration={
+                'Rules': [
+                    {'ApplyServerSideEncryptionByDefault': {
+                        'SSEAlgorithm': 'aws:kms',
+                        'KMSMasterKeyID': KMS_KEY_ID
+                    }}
+                ]
+            }
+        )
+        print(f"KMS encryption enabled for bucket '{BUCKET_NAME}' with key {KMS_KEY_ID}.")
+
+    else:
+        print("Invalid ENCRYPTION_TYPE. Use 'AES256' or 'aws:kms'.")
+
+except NoCredentialsError:
+    print("AWS credentials not found or invalid.")
+except PartialCredentialsError:
+    print("Incomplete AWS credentials provided.")
+except ClientError as e:
+    print(f"AWS Client Error: {e}")
+except ValueError as e:
+    print(f"Configuration Error: {e}")

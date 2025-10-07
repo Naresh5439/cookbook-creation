@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+"""
+Safe S3 Bucket Sync
+Recursively copies all objects from a source bucket to a destination bucket.
+Uses credentials and config from .env.
+"""
+
+import os
+import boto3
+from dotenv import load_dotenv
+from botocore.exceptions import ClientError, NoCredentialsError
+
+# ----- Load environment variables -----
+load_dotenv()
+
+# ----- Read AWS credentials and config -----
+AWS_ACCESS_KEY = os.getenv("AWS_ACCESS_KEY")
+AWS_SECRET_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+AWS_REGION = os.getenv("AWS_REGION")
+SRC_BUCKET = os.getenv("SRC_BUCKET")
+DEST_BUCKET = os.getenv("DEST_BUCKET")
+
+# ----- Validate environment variables -----
+missing_vars = []
+for var_name, var_value in [("AWS_ACCESS_KEY", AWS_ACCESS_KEY),
+                            ("AWS_SECRET_KEY", AWS_SECRET_KEY),
+                            ("AWS_REGION", AWS_REGION),
+                            ("SRC_BUCKET", SRC_BUCKET),
+                            ("DEST_BUCKET", DEST_BUCKET)]:
+    if not var_value:
+        missing_vars.append(var_name)
+
+if missing_vars:
+    raise ValueError(f"Missing environment variables: {', '.join(missing_vars)}")
+
+# ----- Debug print -----
+print(f"Using AWS region: {AWS_REGION}")
+print(f"Source bucket: {SRC_BUCKET}")
+print(f"Destination bucket: {DEST_BUCKET}")
+
+# ----- Create S3 client -----
+try:
+    s3 = boto3.client(
+        's3',
+        region_name=AWS_REGION,
+        aws_access_key_id=AWS_ACCESS_KEY,
+        aws_secret_access_key=AWS_SECRET_KEY
+    )
+except Exception as e:
+    raise RuntimeError(f"Failed to create S3 client: {e}")
+
+# ----- Sync function -----
+def sync_buckets(source_bucket, dest_bucket):
+    try:
+        paginator = s3.get_paginator('list_objects_v2')
+        total_copied = 0
+
+        for page in paginator.paginate(Bucket=source_bucket):
+            for obj in page.get('Contents', []):
+                key = obj['Key']
+                copy_source = {'Bucket': source_bucket, 'Key': key}
+                try:
+                    s3.copy_object(CopySource=copy_source, Bucket=dest_bucket, Key=key)
+                    print(f"Copied: {key}")
+                    total_copied += 1
+                except ClientError as e:
+                    print(f"Failed to copy {key}: {e}")
+
+        print(f"Total objects copied: {total_copied}")
+
+        # Verify counts
+        src_count = sum(len(page.get('Contents', [])) for page in paginator.paginate(Bucket=source_bucket))
+        dest_count = sum(len(page.get('Contents', [])) for page in paginator.paginate(Bucket=dest_bucket))
+        print(f"Source bucket objects: {src_count}")
+        print(f"Destination bucket objects: {dest_count}")
+
+        if src_count == dest_count:
+            print("Sync successful: All objects copied.")
+        else:
+            print("Warning: Object count mismatch!")
+
+    except NoCredentialsError:
+        raise RuntimeError("AWS credentials not found or invalid.")
+    except ClientError as e:
+        raise RuntimeError(f"AWS API error: {e}")
+    except Exception as e:
+        raise RuntimeError(f"Unexpected error: {e}")
+
+# ----- Run sync -----
+sync_buckets(SRC_BUCKET, DEST_BUCKET)

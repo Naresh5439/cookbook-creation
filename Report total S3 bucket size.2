@@ -1,0 +1,51 @@
+import os
+import boto3
+from dotenv import load_dotenv
+from botocore.exceptions import ClientError, NoCredentialsError, PartialCredentialsError
+
+# ----- Load environment variables -----
+load_dotenv()
+
+# ----- Get AWS credentials from environment -----
+AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
+AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+AWS_REGION = os.getenv("AWS_REGION", "us-west-2")
+BUCKET_NAME = os.getenv("BUCKET_NAME")
+
+# ----- Validate credentials -----
+if not AWS_ACCESS_KEY_ID or not AWS_SECRET_ACCESS_KEY:
+    raise NoCredentialsError("No AWS credentials provided explicitly!")
+
+# ----- Create session with explicit credentials -----
+session = boto3.Session(
+    aws_access_key_id=AWS_ACCESS_KEY_ID,
+    aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+    region_name=AWS_REGION
+)
+
+s3_client = session.client("s3")
+
+try:
+    paginator = s3_client.get_paginator("list_objects_v2")
+    total_files = total_size = 0
+
+    for page in paginator.paginate(Bucket=BUCKET_NAME):
+        for obj in page.get("Contents", []):
+            total_files += 1
+            total_size += obj["Size"]
+
+    print(f"Bucket: {BUCKET_NAME}")
+    print(f"Total Files: {total_files}")
+    print(f"Total Size: {total_size / (1024**2):.2f} MB")
+
+except NoCredentialsError:
+    print("AWS credentials not found or invalid.")
+except PartialCredentialsError:
+    print("Incomplete AWS credentials provided.")
+except ClientError as e:
+    print(f"AWS Client Error: {e}")
+Frequency
+30
+Execution Timeout
+20
+Exit Code

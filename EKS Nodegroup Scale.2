@@ -1,1 +1,91 @@
+import boto3
+import os
+import time
+from dotenv import load_dotenv
 
+# ===========================
+# Step 0: Load environment variables
+# ===========================
+load_dotenv()  # Load variables from .env
+
+AWS_ACCESS_KEY = os.getenv("AWS_ACCESS_KEY")
+AWS_SECRET_KEY = os.getenv("AWS_SECRET_KEY")
+REGION = os.getenv("REGION", "ap-south-1")
+CLUSTER_NAME = os.getenv("CLUSTER_NAME")
+NODEGROUP_NAME = os.getenv("NODEGROUP_NAME")
+MIN_NODES = int(os.getenv("MIN_NODES", 1))
+MAX_NODES = int(os.getenv("MAX_NODES", 3))
+DESIRED_NODES = int(os.getenv("DESIRED_NODES", 2))
+
+# ===========================
+# Step 1: Validate AWS Credentials
+# ===========================
+if not AWS_ACCESS_KEY or not AWS_SECRET_KEY:
+    raise Exception("AWS credentials not found in .env file!")
+
+# ===========================
+# Step 2: Create boto3 session and EKS client
+# ===========================
+session = boto3.Session(
+    aws_access_key_id=AWS_ACCESS_KEY,
+    aws_secret_access_key=AWS_SECRET_KEY,
+    region_name=REGION
+)
+
+eks_client = session.client("eks")
+
+# ===========================
+# Step 3: Update Node Group Scaling
+# ===========================
+try:
+    response = eks_client.update_nodegroup_config(
+        clusterName=CLUSTER_NAME,
+        nodegroupName=NODEGROUP_NAME,
+        scalingConfig={
+            'minSize': MIN_NODES,
+            'maxSize': MAX_NODES,
+            'desiredSize': DESIRED_NODES
+        }
+    )
+
+    print("[INFO] Node group scaling update initiated.")
+    print(f"Status: {response['update']['status']}")
+    print(f"Update ID: {response['update']['id']}")
+
+except eks_client.exceptions.ClientException as e:
+    print(f"[ERROR] Failed to update node group: {e}")
+    exit(1)
+
+# ===========================
+# Step 4: Wait for Update Completion
+# ===========================
+print("[INFO] Waiting for node group update to complete...")
+while True:
+    try:
+        update_status = eks_client.describe_update(
+            name=CLUSTER_NAME,
+            nodegroupName=NODEGROUP_NAME,
+            updateId=response['update']['id']
+        )['update']['status']
+
+        print(f"[INFO] Current update status: {update_status}")
+        if update_status in ['Successful', 'Failed', 'Cancelled']:
+            break
+        time.sleep(10)
+
+    except eks_client.exceptions.ClientException as e:
+        print(f"[ERROR] Failed to get update status: {e}")
+        break
+
+print(f"[INFO] Final node group update status: {update_status}")
+
+# ===========================
+# Step 5: Verify Node Group Scaling
+# ===========================
+nodegroup_info = eks_client.describe_nodegroup(
+    clusterName=CLUSTER_NAME,
+    nodegroupName=NODEGROUP_NAME
+)['nodegroup']['scalingConfig']
+
+print("[INFO] Node group current scaling configuration:")
+print(f"MinSize={nodegroup_info['minSize']}, MaxSize={nodegroup_info['maxSize']}, DesiredSize={nodegroup_info['desiredSize']}")

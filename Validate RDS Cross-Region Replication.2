@@ -1,0 +1,202 @@
+#!/usr/bin/env python3
+"""
+Verify RDS / Aurora replication health (Same or Cross-Region) using .env configuration.
+
+Purpose:
+  - Check replication lag across primary and optional DR regions for RDS/Aurora.
+  - Works for both RDS DB instances and Aurora clusters.
+  - Uses CloudWatch metrics (ReplicaLag / AuroraReplicaLag).
+
+Configuration from .env:
+  - AWS_ACCESS_KEY
+  - AWS_SECRET_KEY
+  - PRIMARY_REGION
+  - DR_REGION (optional, if empty only checks primary region)
+  - CLUSTER_OR_INSTANCE_ID
+  - THRESHOLD_SECONDS
+
+IAM Permissions required:
+  - rds:DescribeDBClusters
+  - rds:DescribeDBInstances
+  - cloudwatch:GetMetricStatistics
+
+Exit codes:
+  0 - Replication lag within threshold
+  1 - Configuration / API / permission issue
+  2 - Replication lag exceeded threshold
+"""
+
+import boto3
+import sys
+import os
+from datetime import datetime, timedelta
+from botocore.exceptions import ClientError
+from dotenv import load_dotenv
+
+# ===========================
+# Load configuration from .env
+# ===========================
+load_dotenv()
+
+AWS_ACCESS_KEY = os.getenv("AWS_ACCESS_KEY", "").strip('"').strip("'")
+AWS_SECRET_KEY = os.getenv("AWS_SECRET_KEY", "").strip('"').strip("'")
+PRIMARY_REGION = os.getenv("PRIMARY_REGION", "").strip('"').strip("'")
+DR_REGION = os.getenv("DR_REGION", "").strip('"').strip("'") or None
+CLUSTER_OR_INSTANCE_ID = os.getenv("CLUSTER_OR_INSTANCE_ID", "").strip('"').strip("'")
+THRESHOLD_SECONDS = int(os.getenv("THRESHOLD_SECONDS", "300").strip('"').strip("'"))
+
+# Validate required variables
+missing_vars = [
+    var_name for var_name, value in [
+        ("AWS_ACCESS_KEY", AWS_ACCESS_KEY),
+        ("AWS_SECRET_KEY", AWS_SECRET_KEY),
+        ("PRIMARY_REGION", PRIMARY_REGION),
+        ("CLUSTER_OR_INSTANCE_ID", CLUSTER_OR_INSTANCE_ID),
+        ("THRESHOLD_SECONDS", THRESHOLD_SECONDS)
+    ] if not value
+]
+
+if missing_vars:
+    print(f"[{datetime.utcnow()}] Missing required environment variables: {', '.join(missing_vars)}")
+    sys.exit(1)
+
+# ===========================
+# Initialize clients
+# ===========================
+def create_clients(region):
+    return (
+        boto3.client(
+            "rds",
+            region_name=region,
+            aws_access_key_id=AWS_ACCESS_KEY,
+            aws_secret_access_key=AWS_SECRET_KEY,
+        ),
+        boto3.client(
+            "cloudwatch",
+            region_name=region,
+            aws_access_key_id=AWS_ACCESS_KEY,
+            aws_secret_access_key=AWS_SECRET_KEY,
+        ),
+    )
+
+# ===========================
+# Fetch CloudWatch metric
+# ===========================
+def get_metric_max(cw, namespace, metric_name, dimensions, period=60, lookback_minutes=10):
+    end_time = datetime.utcnow()
+    start_time = end_time - timedelta(minutes=lookback_minutes)
+    resp = cw.get_metric_statistics(
+        Namespace=namespace,
+        MetricName=metric_name,
+        Dimensions=dimensions,
+        StartTime=start_time,
+        EndTime=end_time,
+        Period=period,
+        Statistics=["Maximum"],
+    )
+    datapoints = resp.get("Datapoints", [])
+    if not datapoints:
+        return None, None
+    latest = sorted(datapoints, key=lambda d: d["Timestamp"])[-1]
+    return float(latest["Maximum"]), latest["Timestamp"]
+
+# ===========================
+# Check replication in a region
+# ===========================
+def check_region(region_name, cluster_or_instance):
+    print(f"\n[{datetime.utcnow()}] Checking region: {region_name}")
+    rds, cw = create_clients(region_name)
+
+    alerts = []
+    checked_any_metric = False
+
+    try:
+        # Check Aurora cluster
+        cluster_resp = rds.describe_db_clusters(DBClusterIdentifier=cluster_or_instance)
+        clusters = cluster_resp.get("DBClusters", [])
+        if clusters:
+            cluster = clusters[0]
+            instances = [
+                m.get("DBInstanceIdentifier")
+                for m in cluster.get("DBClusterMembers", [])
+                if m.get("DBInstanceIdentifier")
+            ]
+            print(f"[{datetime.utcnow()}] Aurora cluster found. Members: {instances}")
+
+            # Check AuroraReplicaLag
+            val, ts = get_metric_max(
+                cw,
+                "AWS/RDS",
+                "AuroraReplicaLag",
+                [{"Name": "DBClusterIdentifier", "Value": cluster_or_instance}],
+            )
+            if val is not None:
+                checked_any_metric = True
+                print(f"[{datetime.utcnow()}] AuroraReplicaLag: {val}s at {ts}")
+                if val > THRESHOLD_SECONDS:
+                    alerts.append((cluster_or_instance, val, ts))
+
+        else:
+            # If not Aurora, check regular RDS instance
+            inst_resp = rds.describe_db_instances(DBInstanceIdentifier=cluster_or_instance)
+            instances = [inst_resp["DBInstances"][0]["DBInstanceIdentifier"]]
+            print(f"[{datetime.utcnow()}] Regular RDS instance found: {instances}")
+
+        # Check ReplicaLag for each instance
+        for inst in instances:
+            try:
+                val, ts = get_metric_max(
+                    cw,
+                    "AWS/RDS",
+                    "ReplicaLag",
+                    [{"Name": "DBInstanceIdentifier", "Value": inst}],
+                )
+                if val is not None:
+                    checked_any_metric = True
+                    print(f"[{datetime.utcnow()}] Instance {inst} ReplicaLag: {val}s at {ts}")
+                    if val > THRESHOLD_SECONDS:
+                        alerts.append((inst, val, ts))
+                else:
+                    print(f"[{datetime.utcnow()}] No ReplicaLag metric found for {inst}.")
+            except ClientError as e:
+                print(f"[{datetime.utcnow()}] Error getting metric for {inst}: {e}")
+
+    except ClientError as e:
+        print(f"[{datetime.utcnow()}] AWS API error in region {region_name}: {e}")
+    except Exception as e:
+        print(f"[{datetime.utcnow()}] Unexpected error in region {region_name}: {e}")
+
+    return alerts, checked_any_metric
+
+# ===========================
+# Main check
+# ===========================
+all_alerts = []
+all_checked = False
+
+# Primary region
+primary_alerts, primary_checked = check_region(PRIMARY_REGION, CLUSTER_OR_INSTANCE_ID)
+all_alerts += primary_alerts
+all_checked |= primary_checked
+
+# Optional DR region
+if DR_REGION:
+    dr_alerts, dr_checked = check_region(DR_REGION, CLUSTER_OR_INSTANCE_ID)
+    all_alerts += dr_alerts
+    all_checked |= dr_checked
+
+# ===========================
+# Final evaluation
+# ===========================
+if all_alerts:
+    print(f"\n[{datetime.utcnow()}] ⚠️ ALERT: Replication lag exceeded {THRESHOLD_SECONDS}s threshold:")
+    for name, lag, ts in all_alerts:
+        print(f"  - {name}: {lag}s at {ts}")
+    sys.exit(2)
+elif all_checked:
+    print(f"\n[{datetime.utcnow()}] ✅ Replication lag is within acceptable threshold.")
+    sys.exit(0)
+else:
+    print(f"\n[{datetime.utcnow()}] ⚠️ No replication lag metrics found.")
+    print("Check CloudWatch metrics or IAM permissions.")
+    sys.exit(1)
